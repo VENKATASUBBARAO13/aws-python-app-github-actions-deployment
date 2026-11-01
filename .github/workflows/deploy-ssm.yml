@@ -1,0 +1,122 @@
+
+name: Deploy Python App via AWS Systems Manager (SSM)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Private EC2 via SSM
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Send Deployment Command through SSM
+        shell: bash
+        run: |
+          set -e
+
+          DEPLOY_SCRIPT=$(cat <<'SCRIPT'
+          set -e
+
+          echo "Starting Python application deployment through SSM..."
+
+          sudo apt-get update -y
+          sudo apt-get install -y git python3-venv
+
+          rm -rf /tmp/aws-python-app-deploy
+
+          git clone --depth 1 \
+            https://github.com/VENKATASUBBARAO13/aws-python-app-github-actions-deployment.git \
+            /tmp/aws-python-app-deploy
+
+          sudo mkdir -p /home/ubuntu/python-app
+
+          sudo cp /tmp/aws-python-app-deploy/app/app.py \
+            /home/ubuntu/python-app/app.py
+
+          sudo cp /tmp/aws-python-app-deploy/app/requirements.txt \
+            /home/ubuntu/python-app/requirements.txt
+
+          sudo chown -R ubuntu:ubuntu /home/ubuntu/python-app
+
+          cd /home/ubuntu/python-app
+
+          if [ ! -d venv ]; then
+            python3 -m venv venv
+          fi
+
+          ./venv/bin/pip install -r requirements.txt
+
+          sudo systemctl restart private-python-app
+
+          sleep 5
+
+          sudo systemctl is-active --quiet private-python-app
+
+          curl --fail --retry 10 --retry-connrefused \
+            --retry-delay 3 http://127.0.0.1:5000/health
+
+          echo "Python application deployed successfully through SSM!"
+          SCRIPT
+          )
+
+          jq -n --arg script "$DEPLOY_SCRIPT" \
+            '{commands: [$script]}' > ssm-parameters.json
+
+          COMMAND_ID=$(aws ssm send-command \
+            --targets '[{"Key":"tag:Role","Values":["Private Application Server"]}]' \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy Python Flask application through GitHub Actions and SSM" \
+            --parameters file://ssm-parameters.json \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+          STATUS="Pending"
+
+          for i in {1..30}; do
+            STATUS=$(aws ssm list-command-invocations \
+              --command-id "$COMMAND_ID" \
+              --details \
+              --query "CommandInvocations[0].Status" \
+              --output text)
+
+            echo "Deployment status: $STATUS"
+
+            if [ "$STATUS" = "Success" ]; then
+              break
+            elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" || "$STATUS" == "TimedOut" ]]; then
+              aws ssm list-command-invocations \
+                --command-id "$COMMAND_ID" \
+                --details
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "Deployment did not complete successfully."
+            exit 1
+          fi
+
+          aws ssm list-command-invocations \
+            --command-id "$COMMAND_ID" \
+            --details \
+            --query "CommandInvocations[0].CommandPlugins[0].Output" \
+            --output text
+
+      - name: Deployment completed
+        run: echo "Python application deployed successfully via AWS Systems Manager!"
