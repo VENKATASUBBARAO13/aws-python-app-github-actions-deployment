@@ -1,95 +1,64 @@
-name: Terraform - Provision Public EC2 Infrastructure
+name: Terraform Deploy
 
 on:
   workflow_dispatch:
-    inputs:
-      action:
-        description: "Choose the Terraform operation"
-        type: choice
-        required: true
-        default: plan
-        options:
-          - plan
-          - apply
-          - destroy
 
 permissions:
   contents: read
 
 concurrency:
-  group: terraform-public-ec2-infrastructure
+  group: terraform-public-ec2
   cancel-in-progress: false
 
 jobs:
-  terraform:
-    name: Terraform ${{ inputs.action }}
+  plan:
+    name: Terraform Plan
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: terraform-infrastructure
-
     env:
-      TF_VAR_aws_region: ${{ vars.AWS_REGION }}
-      TF_VAR_availability_zone: ${{ vars.AVAILABILITY_ZONE }}
-      TF_VAR_ami_id: ${{ vars.AMI_ID }}
-      TF_VAR_key_pair_name: ${{ vars.KEY_PAIR_NAME }}
-      TF_VAR_ssh_ingress_cidr: ${{ vars.SSH_INGRESS_CIDR }}
-      TF_VAR_app_ingress_cidr: ${{ vars.APP_INGRESS_CIDR }}
-      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
-
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Configure AWS credentials using IAM access keys
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Verify AWS identity and required inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$TF_STATE_BUCKET" || { echo "Missing TF_STATE_BUCKET environment variable"; exit 1; }
-          test -n "$TF_VAR_aws_region" || { echo "Missing AWS_REGION"; exit 1; }
-          test -n "$TF_VAR_availability_zone" || { echo "Missing AVAILABILITY_ZONE"; exit 1; }
-          test -n "$TF_VAR_ami_id" || { echo "Missing AMI_ID"; exit 1; }
-          test -n "$TF_VAR_key_pair_name" || { echo "Missing KEY_PAIR_NAME"; exit 1; }
-          test -n "$TF_VAR_ssh_ingress_cidr" || { echo "Missing SSH_INGRESS_CIDR"; exit 1; }
-          test -n "$TF_VAR_app_ingress_cidr" || { echo "Missing APP_INGRESS_CIDR"; exit 1; }
-          aws sts get-caller-identity
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
-
-      - name: Terraform format check
+      - name: Terraform Init
+        run: terraform init -input=false
+      - name: Terraform Format
         run: terraform fmt -check -recursive
-
-      - name: Terraform init with S3 remote state
-        run: |
-          terraform init -input=false \
-            -backend-config="bucket=$TF_STATE_BUCKET" \
-            -backend-config="key=aws-python-app/terraform.tfstate" \
-            -backend-config="region=$TF_VAR_aws_region" \
-            -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true"
-
-      - name: Terraform validate
+      - name: Terraform Validate
         run: terraform validate
-
-      - name: Terraform plan
-        if: inputs.action == 'plan' || inputs.action == 'apply'
+      - name: Terraform Plan
         run: terraform plan -input=false -out=tfplan
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: tfplan
+          retention-days: 1
 
-      - name: Terraform apply
-        if: inputs.action == 'apply'
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: plan
+    environment: production
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+      - name: Terraform Init
+        run: terraform init -input=false
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+      - name: Terraform Apply
         run: terraform apply -input=false -auto-approve tfplan
-
-      - name: Show created infrastructure outputs
-        if: inputs.action == 'apply'
+      - name: Show Terraform Outputs
         run: terraform output
-
-      - name: Terraform destroy
-        if: inputs.action == 'destroy'
-        run: terraform destroy -input=false -auto-approve
