@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Terraform action"
+        description: "Choose the Terraform operation"
         type: choice
         required: true
-        default: apply
+        default: plan
         options:
           - plan
           - apply
@@ -25,11 +25,17 @@ jobs:
   terraform:
     name: Terraform ${{ inputs.action }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: terraform-infrastructure
 
-    defaults:
-      run:
-        working-directory: .
+    env:
+      TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+      TF_VAR_availability_zone: ${{ vars.AVAILABILITY_ZONE }}
+      TF_VAR_ami_id: ${{ vars.AMI_ID }}
+      TF_VAR_key_pair_name: ${{ vars.KEY_PAIR_NAME }}
+      TF_VAR_ssh_ingress_cidr: ${{ vars.SSH_INGRESS_CIDR }}
+      TF_VAR_app_ingress_cidr: ${{ vars.APP_INGRESS_CIDR }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
 
     steps:
       - name: Checkout repository
@@ -41,8 +47,18 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
+      - name: Verify AWS identity and required inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TF_STATE_BUCKET" || { echo "Missing TF_STATE_BUCKET environment variable"; exit 1; }
+          test -n "$TF_VAR_aws_region" || { echo "Missing AWS_REGION"; exit 1; }
+          test -n "$TF_VAR_availability_zone" || { echo "Missing AVAILABILITY_ZONE"; exit 1; }
+          test -n "$TF_VAR_ami_id" || { echo "Missing AMI_ID"; exit 1; }
+          test -n "$TF_VAR_key_pair_name" || { echo "Missing KEY_PAIR_NAME"; exit 1; }
+          test -n "$TF_VAR_ssh_ingress_cidr" || { echo "Missing SSH_INGRESS_CIDR"; exit 1; }
+          test -n "$TF_VAR_app_ingress_cidr" || { echo "Missing APP_INGRESS_CIDR"; exit 1; }
+          aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -50,8 +66,14 @@ jobs:
       - name: Terraform format check
         run: terraform fmt -check -recursive
 
-      - name: Terraform init
-        run: terraform init
+      - name: Terraform init with S3 remote state
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="key=aws-python-app/terraform.tfstate" \
+            -backend-config="region=$TF_VAR_aws_region" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
 
       - name: Terraform validate
         run: terraform validate
@@ -63,6 +85,10 @@ jobs:
       - name: Terraform apply
         if: inputs.action == 'apply'
         run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Show created infrastructure outputs
+        if: inputs.action == 'apply'
+        run: terraform output
 
       - name: Terraform destroy
         if: inputs.action == 'destroy'
