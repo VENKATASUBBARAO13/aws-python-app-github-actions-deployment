@@ -1,7 +1,13 @@
 terraform {
   required_version = ">= 1.10.0"
 
-  backend "s3" {}
+  backend "s3" {
+    bucket       = "aws-python-app-github-actions-deployment"
+    key          = "aws-python-app/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
 
   required_providers {
     aws = {
@@ -11,8 +17,6 @@ terraform {
   }
 }
 
-# Public EC2 lab infrastructure:
-# VPC -> Public Subnet -> Internet Gateway -> Route Table -> Security Group -> EC2
 resource "aws_vpc" "app_vpc" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -26,10 +30,7 @@ resource "aws_vpc" "app_vpc" {
 
 resource "aws_internet_gateway" "app_igw" {
   vpc_id = aws_vpc.app_vpc.id
-
-  tags = {
-    Name = "${var.project_name}-igw"
-  }
+  tags   = { Name = "${var.project_name}-igw" }
 }
 
 resource "aws_subnet" "public" {
@@ -52,9 +53,7 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.app_igw.id
   }
 
-  tags = {
-    Name = "${var.project_name}-public-rt"
-  }
+  tags = { Name = "${var.project_name}-public-rt" }
 }
 
 resource "aws_route_table_association" "public" {
@@ -64,11 +63,11 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "app_sg" {
   name_prefix = "${var.project_name}-"
-  description = "SSH from admin and temporary GitHub runner; app from user's IP"
+  description = "Restricted SSH and Flask application access"
   vpc_id      = aws_vpc.app_vpc.id
 
   ingress {
-    description = "SSH from administrator's current public IP"
+    description = "SSH from administrator public IP"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -76,7 +75,7 @@ resource "aws_security_group" "app_sg" {
   }
 
   ingress {
-    description = "Flask demo application from administrator's current public IP"
+    description = "Flask demo app from administrator public IP"
     from_port   = 5000
     to_port     = 5000
     protocol    = "tcp"
@@ -84,16 +83,13 @@ resource "aws_security_group" "app_sg" {
   }
 
   egress {
-    description = "Outbound access for package installation and updates"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
-    Name = "${var.project_name}-sg"
-  }
+  tags = { Name = "${var.project_name}-sg" }
 
   lifecycle {
     create_before_destroy = true
