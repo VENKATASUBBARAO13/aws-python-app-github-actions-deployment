@@ -65,3 +65,9 @@ variable "root_volume_size" {
   type        = number
   default     = 8
 }
+
+variable "private_subnet_cidr" {
+  description = "Private subnet IPv4 CIDR"
+  type        = string
+  default     = "10.20.2.0/24"
+}
