@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.10.0"
 
   backend "s3" {
-    bucket       = "aws-python-app-github-actions-deployment"
+    bucket       = "aws-python-app-github-actions-deployments"
     key          = "aws-python-app/terraform.tfstate"
     region       = "us-east-1"
     encrypt      = true
