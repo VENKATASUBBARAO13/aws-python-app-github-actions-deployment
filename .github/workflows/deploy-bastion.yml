@@ -1,0 +1,58 @@
+
+name: Deploy Python App via Bastion Host
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Private EC2 via Bastion
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          ssh-keyscan -H 3.236.90.233 >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            ubuntu@3.236.90.233 \
+            "ssh-keyscan -H 10.20.2.38" >> ~/.ssh/known_hosts
+
+      - name: Package application
+        run: tar -czf app.tar.gz app
+
+      - name: Copy application to Private EC2
+        run: |
+          scp -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ProxyCommand="ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -W %h:%p ubuntu@3.236.90.233" \
+            app.tar.gz ubuntu@10.20.2.38:~/python-app/
+
+      - name: Deploy and restart application
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ProxyCommand="ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -W %h:%p ubuntu@3.236.90.233" \
+            ubuntu@10.20.2.38 << 'EOF'
+              cd ~/python-app
+              tar -xzf app.tar.gz
+              source venv/bin/activate
+              pip install -r app/requirements.txt
+              sudo systemctl restart private-python-app
+              sleep 5
+              curl --fail --retry 10 --retry-connrefused --retry-delay 3 http://127.0.0.1:5000/health
+          EOF
+
+      - name: Deployment completed
+        run: echo "Python application deployed successfully via Bastion Host!"
