@@ -23,6 +23,26 @@ output "instance_public_ip" {
   value       = aws_instance.app_server.public_ip
 }
 
+output "bastion_public_ip" {
+  description = "Public IP address of the Bastion Host"
+  value       = aws_instance.bastion.public_ip
+}
+
+output "bastion_instance_id" {
+  description = "Bastion Host EC2 instance ID"
+  value       = aws_instance.bastion.id
+}
+
+output "private_instance_id" {
+  description = "Private application EC2 instance ID"
+  value       = aws_instance.private_app_server.id
+}
+
+output "private_instance_ip" {
+  description = "Private IP address of the application EC2"
+  value       = aws_instance.private_app_server.private_ip
+}
+
 output "application_url" {
   description = "Flask application URL after the app deployment workflow succeeds"
   value       = "http://${aws_instance.app_server.public_ip}:5000"
