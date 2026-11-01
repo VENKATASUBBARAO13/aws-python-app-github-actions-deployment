@@ -1,245 +1,111 @@
 # Terraform + GitHub Actions: Provision EC2 and Deploy a Python Application
 
-This project follows an infrastructure-first sequence. Terraform creates the AWS VPC and public Ubuntu EC2 instance. A separate GitHub Actions workflow deploys a sample Flask application to the provisioned EC2 instance.
+This project uses Terraform and GitHub Actions to create AWS networking and a public Ubuntu EC2 instance, then deploy a Flask application over SSH. AWS authentication uses IAM access keys stored as GitHub Actions secrets. **OIDC is not used.**
 
-AWS authentication uses an IAM user's access key ID and secret access key stored as encrypted GitHub Actions secrets. This project does not use GitHub OIDC.
+## Workflow
 
-## Project flow
-
-```text
-GitHub Repository
-       |
-       v
-Terraform GitHub Actions workflow
-       |
-       +--> AWS IAM access keys from GitHub Secrets
-       +--> Terraform init / fmt / validate / plan
-       +--> Terraform apply
-       |
-       v
-AWS resources
-       |
-       +--> VPC
-       +--> Internet Gateway
-       +--> Public Subnet
-       +--> Public Route Table + Association
-       +--> Security Group
-       +--> Ubuntu EC2 Instance + Public IP
-       |
-       v
-Terraform outputs (instance IP + security group ID)
-       |
-       v
-Python deployment GitHub Actions workflow
-       |
-       +--> AWS IAM access keys from GitHub Secrets
-       +--> Temporarily allow runner IP on SSH/22
-       +--> SSH / SCP application bundle to EC2
-       +--> Install Flask + Gunicorn and configure systemd
-       +--> Remove temporary SSH ingress
-       |
-       v
-http://EC2_PUBLIC_IP:5000/
-```
+1. GitHub Actions runs Terraform format, init, validate and plan.
+2. The Terraform plan is uploaded as an artifact.
+3. The `apply` job waits for approval through the GitHub `production` environment.
+4. After approval, Terraform applies the saved plan and prints the outputs.
+5. A separate workflow deploys the Python application to the public EC2 instance.
 
 ## Repository structure
 
 ```text
 .
-├── .github/
-│   └── workflows/
-│       ├── terraform-infrastructure.yml
-│       └── deploy-public.yml
+├── .github/workflows/
+│   ├── terraform-infrastructure.yml
+│   ├── terraform-destroy.yml
+│   └── deploy-public.yml
 ├── app/
 │   ├── app.py
 │   └── requirements.txt
-├── scripts/
-│   └── deploy.sh
+├── scripts/deploy.sh
 ├── main.tf
 ├── variables.tf
 ├── providers.tf
 ├── outputs.tf
-├── terraform.tfvars.example
-├── .gitignore
-└── README.md
+├── terraform.tfvars
+└── .gitignore
 ```
 
-## Resources created by Terraform
+## AWS region and backend
 
-| Resource | Purpose |
-|---|---|
-| VPC | Isolated project network |
-| Internet Gateway | Internet connectivity for the public subnet |
-| Public Subnet | Hosts the public EC2 instance |
-| Public Route Table | Routes internet-bound traffic through the IGW |
-| Route Table Association | Connects the subnet to the public route table |
-| Security Group | Restricts SSH and app ingress |
-| EC2 Instance | Ubuntu application server with public IPv4 |
+- Region: `us-east-1` (N. Virginia)
+- Availability Zone: `us-east-1a`
+- Terraform state bucket: `aws-python-app-github-actions-deployment`
+- State key: `aws-python-app/terraform.tfstate`
+- S3 native state locking: enabled with `use_lockfile = true`
 
-This first stage intentionally creates a **public EC2 instance**. The private EC2 approaches (Bastion Host and SSM) will be added only after this deployment is tested.
+The S3 bucket must exist before running Terraform. Keep Block Public Access enabled, enable versioning, and keep default encryption enabled. Do not delete the bucket when destroying the VPC/EC2 resources.
 
-## 1. Prepare AWS prerequisites
+## 1. Configure AWS IAM credentials
 
-### 1.1 Choose your region and key pair
+Create a dedicated IAM user for this lab. Do not use root access keys. Create an access key for programmatic access and attach permissions to manage the Terraform resources in `main.tf`, read/write the state object in the S3 bucket, manage its lock file, and add/remove the temporary SSH ingress rule used by the deployment workflow.
 
-This repository uses the N. Virginia region (`us-east-1`) and Availability Zone `us-east-1a`.
+Store these as **repository secrets** under Settings → Secrets and variables → Actions:
 
-1. In the EC2 console, create a key pair in `us-east-1`.
-2. Download and safely store the PEM private key. Never upload it to GitHub as a repository file.
-3. Find an Ubuntu Server 24.04 LTS AMI ID in `us-east-1`.
-4. Find your current public IPv4 address. Use the value with `/32` for SSH and app access.
-
-### 1.2 Create an S3 bucket for Terraform state
-
-Create a dedicated S3 bucket in `us-east-1` before running Terraform:
-
-1. Open **S3 → Create bucket**.
-2. Choose a globally unique bucket name.
-3. Select **US East (N. Virginia) us-east-1**.
-4. Keep Block all public access enabled.
-5. Enable Bucket Versioning.
-6. Keep default server-side encryption enabled.
-7. Create the bucket.
-
-The bucket is a bootstrap resource and is not created or destroyed by this project. Keep it after the lab because it stores Terraform state.
-
-## 2. Create an IAM user for GitHub Actions
-
-This project uses long-lived IAM access keys because you requested the traditional GitHub Actions secrets-and-variables method rather than OIDC.
-
-1. In AWS IAM, create a dedicated IAM user for this lab, for example `github-actions-terraform-lab`.
-2. Do not use your AWS root account or root access keys.
-3. Create an access key for programmatic use and download/copy the secret key once. AWS will not show the secret key again.
-4. Attach a least-privilege permissions policy for the resources in this project and the S3 Terraform backend. The user needs permissions to manage the VPC, subnet, Internet Gateway, route table, route table association, security group, EC2 instance and tags. It also needs S3 state access:
-   - `s3:ListBucket` on the dedicated state bucket.
-   - `s3:GetObject` and `s3:PutObject` on `aws-python-app/terraform.tfstate`.
-   - `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject` on `aws-python-app/terraform.tfstate.tflock`.
-5. The same access key is used by both workflows, so it also needs `ec2:AuthorizeSecurityGroupIngress` and `ec2:RevokeSecurityGroupIngress` for the project's EC2 security group. For a lab, you may initially grant a broader EC2/VPC permissions policy, but narrow it before production use.
-
-Keep the access key and secret key private. Rotate or deactivate the key when the lab is finished.
-
-## 3. Configure GitHub Environments, secrets and variables
-
-Open the repository → **Settings → Environments**. Create these two environments.
-
-### Environment: `terraform-infrastructure`
-
-Add these environment secrets:
-
-| Secret name | Value |
+| Secret | Purpose |
 |---|---|
 | `AWS_ACCESS_KEY_ID` | IAM user's access key ID |
 | `AWS_SECRET_ACCESS_KEY` | IAM user's secret access key |
+| `EC2_SSH_PRIVATE_KEY` | EC2 key pair private key; needed later for app deployment |
 
-Add these environment variables:
+Never commit access keys or PEM private keys to the repository.
 
-| Variable | Value |
-|---|---|
-| `AWS_REGION` | `us-east-1` |
-| `AVAILABILITY_ZONE` | `us-east-1a` |
-| `AMI_ID` | Ubuntu 24.04 AMI ID from us-east-1 |
-| `KEY_PAIR_NAME` | Existing EC2 key pair name |
-| `SSH_INGRESS_CIDR` | Your current public IP followed by `/32` |
-| `APP_INGRESS_CIDR` | Your current public IP followed by `/32` |
-| `TF_STATE_BUCKET` | Exact name of your S3 state bucket |
+## 2. Configure the production environment
 
-### Environment: `public-ec2-deployment`
+Open Settings → Environments → New environment. Name it exactly `production`.
 
-Add these environment secrets:
+Configure **Required reviewers** and enable prevention of self-review if available on your GitHub plan. The Terraform apply and destroy jobs both reference this environment and will wait for its protection rules before running.
 
-| Secret name | Value |
-|---|---|
-| `AWS_ACCESS_KEY_ID` | Same IAM user's access key ID |
-| `AWS_SECRET_ACCESS_KEY` | Same IAM user's secret access key |
-| `EC2_SSH_PRIVATE_KEY` | Full PEM private key for the EC2 key pair |
+The environment itself is a GitHub UI setting; the workflow file references it by name.
 
-Add these environment variables after Terraform apply succeeds:
+## 3. Configure Terraform inputs
 
-| Variable | Value |
-|---|---|
-| `AWS_REGION` | `us-east-1` |
-| `EC2_PUBLIC_IP` | Terraform output `instance_public_ip` |
-| `EC2_SECURITY_GROUP_ID` | Terraform output `security_group_id` |
-| `EC2_SSH_USER` | `ubuntu` |
+Edit `terraform.tfvars` in the repository before running the workflow. This file contains non-secret infrastructure configuration:
 
-Use GitHub **Secrets** for credentials and private keys. Use **Variables** for non-sensitive configuration such as region, CIDRs, AMI ID and resource IDs.
+- `ami_id`: Ubuntu 24.04 LTS AMI ID from EC2 in `us-east-1`.
+- `key_pair_name`: an EC2 key pair that already exists in `us-east-1`.
+- `ssh_ingress_cidr`: your current public IPv4 address with `/32`.
+- `app_ingress_cidr`: your current public IPv4 address with `/32`.
 
-## 4. Run Terraform to create the VPC and EC2
+The region and AZ are already set to `us-east-1` and `us-east-1a`. Do not use `0.0.0.0/0` for SSH access.
 
-1. Open the repository's **Actions** tab.
-2. Select **Terraform - Provision Public EC2 Infrastructure**.
-3. Click **Run workflow** and choose `plan`.
-4. Review the plan carefully.
-5. Run the workflow again and choose `apply`.
-6. Inspect the Terraform outputs, especially `instance_public_ip` and `security_group_id`.
+## 4. Provision infrastructure
 
-The workflow runs `terraform init`, `fmt`, `validate`, `plan` and `apply`. State is persisted in the S3 backend and protected by S3 lock files.
+1. Open Actions → **Terraform Deploy**.
+2. Select Run workflow.
+3. Review the Terraform Plan job.
+4. The Apply job waits for approval in the `production` environment.
+5. Approve the deployment when the plan is correct.
+6. Check the Terraform outputs for VPC ID, subnet ID, security group ID, EC2 instance ID and public IP.
+
+The saved plan is passed from the plan job to the apply job as a short-retention artifact. Terraform state persists in S3 across workflow runs.
 
 ## 5. Deploy the Python application
 
-After Terraform creates the EC2 instance:
+After infrastructure is created, use the EC2 public IP, security group ID and SSH private key in the deployment workflow's required configuration. The deployment workflow uses SSH/SCP and starts the Flask application with Gunicorn and systemd.
 
-1. Copy `instance_public_ip` and `security_group_id` from the Terraform workflow output into the `public-ec2-deployment` environment variables.
-2. Add the PEM private key as `EC2_SSH_PRIVATE_KEY`.
-3. Open **Actions → Deploy Python App to Public EC2**.
-4. Click **Run workflow**.
-
-The deploy workflow uses the IAM access keys to temporarily add the GitHub runner's public IP (/32) to the EC2 security group's SSH rule, deploys over SSH/SCP, and removes that temporary rule at the end.
-
-## 6. Verify the application
-
-Open:
+Verify:
 
 ```text
 http://EC2_PUBLIC_IP:5000/
 http://EC2_PUBLIC_IP:5000/health
 ```
 
-Expected health response:
+## 6. Destroy infrastructure
 
-```json
-{"status":"healthy"}
-```
+Open Actions → **Terraform Destroy** and run the workflow. The job uses the `production` environment, so it waits for approval before destroying the managed VPC and EC2 resources. The S3 state bucket is retained.
 
-Your public IP must be allowed on TCP/5000 in the EC2 security group.
+## Security and cost
 
-## 7. Destroy resources when finished
-
-1. Open **Actions → Terraform - Provision Public EC2 Infrastructure**.
-2. Choose `destroy`.
-3. Review the action and wait for Terraform to finish.
-4. Verify the EC2 instance, security group, subnet, route table, Internet Gateway and VPC are removed.
-
-Keep the S3 state bucket until you are permanently finished with this Terraform project and have safely archived any state history you need.
-
-## Troubleshooting
-
-- **AWS credentials error:** Check that both access key ID and secret access key are correctly stored as environment secrets.
-- **Terraform backend init fails:** Check that the S3 bucket exists in `us-east-1` and the IAM user has state and lock-file permissions.
-- **AMI or AZ error:** Confirm the Ubuntu AMI belongs to `us-east-1` and the Availability Zone is `us-east-1a`.
-- **SSH timeout:** Check EC2 public IP, public route table, Internet Gateway, NACL and temporary runner-IP security group rule.
-- **Permission denied (publickey):** Confirm the PEM secret matches the selected EC2 key pair and the SSH username is `ubuntu`.
-- **Application unavailable:** Check the EC2 systemd service and TCP/5000 ingress CIDR.
-
-## Cost and security notes
-
-- IAM access keys are long-lived credentials. Never commit them to Git, paste them into workflow files, or share them in screenshots.
-- Use a dedicated IAM user with only the permissions required for this lab, not root credentials or unrestricted administrator access.
-- Rotate or deactivate the access key after completing the lab.
-- EC2, EBS volumes, public IPv4 addresses and other AWS resources may incur charges. Destroy lab resources after testing.
-- Keep port 22 and port 5000 restricted to specific /32 addresses. Never use `0.0.0.0/0` for SSH.
-- The S3 state bucket can contain sensitive infrastructure metadata. Keep it private, encrypted and versioned.
-- The app uses HTTP and port 5000 for a learning lab only. Do not use this as-is for production or sensitive traffic.
-- Bastion Host and SSM private-instance deployments will be separate follow-up stages.
-
-## What I learned
-
-- Defining AWS infrastructure using Terraform.
-- Creating VPC networking, public subnet, Internet Gateway, route table and security group.
-- Provisioning EC2 using GitHub Actions and Terraform.
-- Managing Terraform state remotely in S3.
-- Configuring AWS credentials using GitHub Actions secrets and variables.
-- Deploying a Python application with SSH, SCP, Gunicorn and systemd.
+- IAM access keys are long-lived credentials. Use a dedicated least-privilege IAM user and rotate/deactivate keys after the lab.
+- Restrict SSH and app ingress to your own public IP /32.
+- S3 state may contain sensitive infrastructure metadata. Keep the bucket private, encrypted and versioned.
+- EC2, EBS and public IPv4 may incur charges. Destroy lab resources after testing.
+- This public-EC2 HTTP application is for learning only, not production use.
 
 ## Author
 
