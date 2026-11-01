@@ -1,5 +1,7 @@
 terraform {
-  required_version = ">= 1.6.0"
+  required_version = ">= 1.10.0"
+
+  backend "s3" {}
 
   required_providers {
     aws = {
@@ -62,11 +64,11 @@ resource "aws_route_table_association" "public" {
 
 resource "aws_security_group" "app_sg" {
   name_prefix = "${var.project_name}-"
-  description = "SSH from deployment runner and Flask app from the user's IP"
+  description = "SSH from admin and temporary GitHub runner; app from user's IP"
   vpc_id      = aws_vpc.app_vpc.id
 
   ingress {
-    description = "SSH - restricted to the configured deployment CIDR"
+    description = "SSH from administrator's current public IP"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -74,7 +76,7 @@ resource "aws_security_group" "app_sg" {
   }
 
   ingress {
-    description = "Flask demo application - restrict to your own public IP"
+    description = "Flask demo application from administrator's current public IP"
     from_port   = 5000
     to_port     = 5000
     protocol    = "tcp"
