@@ -90,7 +90,7 @@ jobs:
           scp -i ~/.ssh/ec2_deploy_key -o BatchMode=yes deployment.tar.gz \
             "ubuntu@$EC2_HOST:/tmp/python-app-deploy/deployment.tar.gz"
           ssh -i ~/.ssh/ec2_deploy_key -o BatchMode=yes "ubuntu@$EC2_HOST" \
-            "cd /tmp/python-app-deploy && tar -xzf deployment.tar.gz && sudo bash scripts/deploy.sh && curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:5000/health"
+            "cd /tmp/python-app-deploy && tar -xzf deployment.tar.gz && sudo bash scripts/deploy.sh && curl --fail --retry 10 --retry-connrefused --retry-delay 3 http://127.0.0.1:5000/health"
 
       - name: Remove temporary SSH ingress rule
         if: always() && steps.ingress.outputs.runner_cidr != ''
