@@ -80,7 +80,7 @@ This first stage intentionally creates a **public EC2 instance**. The private EC
 
 ### 1.1 Choose your region and key pair
 
-This repository defaults to the Mumbai region (`ap-south-1`) and Availability Zone `ap-south-1a`. You may change them, but the AMI, key pair, AZ, state bucket and all GitHub settings must use the same region where applicable.
+This repository defaults to the N. Virginia region (`us-east-1`) and Availability Zone `us-east-1a`. You may change them, but the AMI, key pair, AZ, state bucket and all GitHub settings must use the same region where applicable.
 
 1. In the EC2 console, create a key pair in the selected region.
 2. Download and safely store the PEM private key. Never upload it to GitHub as a repository file.
@@ -172,8 +172,8 @@ Add these environment variables:
 
 | Variable | Example / meaning |
 |---|---|
-| `AWS_REGION` | `ap-south-1` |
-| `AVAILABILITY_ZONE` | `ap-south-1a` |
+| `AWS_REGION` | `us-east-1` |
+| `AVAILABILITY_ZONE` | `us-east-1a` |
 | `AMI_ID` | Ubuntu 24.04 AMI ID for your region |
 | `KEY_PAIR_NAME` | Existing EC2 key pair name |
 | `SSH_INGRESS_CIDR` | Your current public IP followed by `/32` |
