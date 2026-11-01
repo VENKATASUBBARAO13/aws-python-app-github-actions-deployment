@@ -15,7 +15,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: terraform-public-ec2-infrastructure
@@ -41,10 +40,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials using GitHub OIDC
+      - name: Configure AWS credentials using IAM access keys
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Verify AWS identity and required inputs
