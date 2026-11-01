@@ -1,0 +1,112 @@
+name: Deploy Python App to Public EC2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: public-ec2-python-app-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy through public IP and SSH
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: public-ec2-deployment
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify AWS identity and required configuration
+        env:
+          EC2_HOST: ${{ vars.EC2_PUBLIC_IP }}
+          SECURITY_GROUP_ID: ${{ vars.EC2_SECURITY_GROUP_ID }}
+          SSH_USER: ${{ vars.EC2_SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$EC2_HOST" || { echo "EC2_PUBLIC_IP variable is missing"; exit 1; }
+          test -n "$SECURITY_GROUP_ID" || { echo "EC2_SECURITY_GROUP_ID variable is missing"; exit 1; }
+          test -n "$SSH_USER" || { echo "EC2_SSH_USER variable is missing"; exit 1; }
+          test -n "$SSH_PRIVATE_KEY" || { echo "EC2_SSH_PRIVATE_KEY secret is missing"; exit 1; }
+          aws sts get-caller-identity
+
+      - name: Prepare SSH private key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/ec2_deploy_key
+          chmod 600 ~/.ssh/ec2_deploy_key
+
+      - name: Temporarily allow SSH from this GitHub runner
+        id: ingress
+        env:
+          SECURITY_GROUP_ID: ${{ vars.EC2_SECURITY_GROUP_ID }}
+        run: |
+          set -euo pipefail
+          RUNNER_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')
+          RUNNER_CIDR="$RUNNER_IP/32"
+          echo "runner_cidr=$RUNNER_CIDR" >> "$GITHUB_OUTPUT"
+
+          PERMISSION=$(jq -nc --arg cidr "$RUNNER_CIDR" \
+            '[{IpProtocol:"tcp",FromPort:22,ToPort:22,IpRanges:[{CidrIp:$cidr,Description:"Temporary GitHub Actions SSH"}]}]')
+
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$SECURITY_GROUP_ID" \
+            --ip-permissions "$PERMISSION"
+
+      - name: Package application
+        run: tar -czf deployment.tar.gz app scripts/deploy.sh
+
+      - name: Copy and deploy application on EC2
+        env:
+          EC2_HOST: ${{ vars.EC2_PUBLIC_IP }}
+          SSH_USER: ${{ vars.EC2_SSH_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/ec2_deploy_key \
+            -o BatchMode=yes \
+            -o ConnectTimeout=20 \
+            "$SSH_USER@$EC2_HOST" \
+            "mkdir -p /tmp/python-app-deploy"
+
+          scp -i ~/.ssh/ec2_deploy_key \
+            -o BatchMode=yes \
+            deployment.tar.gz \
+            "$SSH_USER@$EC2_HOST:/tmp/python-app-deploy/deployment.tar.gz"
+
+          ssh -i ~/.ssh/ec2_deploy_key \
+            -o BatchMode=yes \
+            "$SSH_USER@$EC2_HOST" \
+            "cd /tmp/python-app-deploy && tar -xzf deployment.tar.gz && sudo bash scripts/deploy.sh && curl --fail --retry 10 --retry-delay 3 http://127.0.0.1:5000/health"
+
+      - name: Remove temporary SSH ingress rule
+        if: always() && steps.ingress.outputs.runner_cidr != ''
+        env:
+          SECURITY_GROUP_ID: ${{ vars.EC2_SECURITY_GROUP_ID }}
+          RUNNER_CIDR: ${{ steps.ingress.outputs.runner_cidr }}
+        run: |
+          PERMISSION=$(jq -nc --arg cidr "$RUNNER_CIDR" \
+            '[{IpProtocol:"tcp",FromPort:22,ToPort:22,IpRanges:[{CidrIp:$cidr}]}]')
+          aws ec2 revoke-security-group-ingress \
+            --group-id "$SECURITY_GROUP_ID" \
+            --ip-permissions "$PERMISSION"
+
+      - name: Remove temporary SSH key from runner
+        if: always()
+        run: rm -f ~/.ssh/ec2_deploy_key
