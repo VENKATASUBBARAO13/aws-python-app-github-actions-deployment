@@ -1,7 +1,7 @@
 variable "aws_region" {
   description = "AWS region for all resources"
   type        = string
-  default     = "ap-south-1"
+  default     = "us-east-1"
 }
 
 variable "project_name" {
@@ -31,7 +31,7 @@ variable "public_subnet_cidr" {
 variable "availability_zone" {
   description = "Availability Zone for the public subnet (must belong to aws_region)"
   type        = string
-  default     = "ap-south-1a"
+  default     = "us-east-1a"
 }
 
 variable "ami_id" {
