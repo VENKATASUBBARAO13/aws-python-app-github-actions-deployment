@@ -1,29 +1,38 @@
-# Deploy a Python Application on AWS EC2 using GitHub Actions
+# Terraform + GitHub Actions: Provision EC2 and Deploy a Python Application
 
-This project deploys a sample Python Flask application to an Ubuntu EC2 instance using GitHub Actions, AWS OIDC authentication, SSH and SCP.
+This project follows an infrastructure-first deployment sequence using Terraform and GitHub Actions. Terraform provisions the AWS network and a public Ubuntu EC2 instance. A second GitHub Actions workflow deploys a sample Flask application to that instance through SSH.
 
-> **Current implementation:** Public EC2 deployment using its public IPv4 address. Bastion Host and SSM deployments will be added as separate approaches after this workflow is completed and tested.
-
-## Architecture
+## Project flow
 
 ```text
 GitHub Repository
        |
        v
-GitHub Actions (Ubuntu runner)
+GitHub Actions - Terraform workflow
        |
-       +--> Authenticate to AWS using GitHub OIDC
-       |
-       +--> Temporarily allow runner public IP (/32) on EC2 TCP/22
-       |
-       +--> SSH / SCP application bundle
+       +--> OIDC authentication to AWS
+       +--> terraform init / fmt / validate / plan
+       +--> terraform apply
        |
        v
-EC2 Ubuntu instance (Public subnet)
+AWS infrastructure
        |
-       +--> Install Python dependencies
-       +--> Run Flask with Gunicorn
-       +--> Manage application with systemd
+       +--> VPC
+       +--> Internet Gateway
+       +--> Public Subnet
+       +--> Public Route Table + Association
+       +--> Security Group
+       +--> Ubuntu EC2 Instance + Public IP
+       |
+       v
+Terraform output: instance_public_ip
+       |
+       v
+GitHub Actions - Python deployment workflow
+       |
+       +--> SSH / SCP to EC2 public IP
+       +--> Install Flask + Gunicorn
+       +--> Configure systemd service
        |
        v
 http://EC2_PUBLIC_IP:5000/
@@ -32,135 +41,142 @@ http://EC2_PUBLIC_IP:5000/
 ## Repository structure
 
 ```text
-aws-python-app-github-actions-deployment/
+.
 ├── .github/
 │   └── workflows/
+│       ├── terraform-infrastructure.yml
 │       └── deploy-public.yml
 ├── app/
 │   ├── app.py
 │   └── requirements.txt
 ├── scripts/
 │   └── deploy.sh
+├── main.tf
+├── variables.tf
+├── providers.tf
+├── outputs.tf
+├── terraform.tfvars.example
 ├── .gitignore
 └── README.md
 ```
 
-## Sample application
+## Resources created
 
-| Endpoint | Purpose |
+| Terraform resource | Purpose |
 |---|---|
-| `/` | Returns a JSON welcome message and deployment information |
-| `/health` | Health check; returns HTTP 200 when the app is running |
+| `aws_vpc` | Isolated project network |
+| `aws_internet_gateway` | Internet connectivity for the public subnet |
+| `aws_subnet` | Public subnet with public IP assignment |
+| `aws_route_table` | Default route to the Internet Gateway |
+| `aws_route_table_association` | Associates the public subnet with its route table |
+| `aws_security_group` | Restricts SSH and app ingress |
+| `aws_instance` | Ubuntu EC2 application server |
 
-The application listens on port `5000`. Gunicorn runs the Flask app as a systemd service named `aws-python-app`.
+The initial deployment is intentionally a **public EC2** design to satisfy the public-IP assignment. Bastion and SSM private-instance methods will be added as separate stages later.
 
-## Prerequisites
+## 1. Before running Terraform
 
-- An AWS account.
-- An Ubuntu 22.04 or 24.04 EC2 instance in a public subnet, with a public IPv4 address.
-- An EC2 key pair. Keep its private key safe.
-- An IAM role configured for GitHub OIDC.
-- GitHub Actions enabled for this repository.
+1. Choose the AWS region and availability zone for the lab.
+2. Create an EC2 key pair in that same region and safely retain its PEM private key.
+3. Find an Ubuntu Server 24.04 LTS AMI ID for the selected region.
+4. Find your current public IPv4 address. Use it with `/32` for both `ssh_ingress_cidr` and `app_ingress_cidr`.
+5. Do not commit `terraform.tfvars`, state files, plan files, PEM files, or credentials.
 
-Do not use AWS root credentials or commit access keys, SSH private keys, or other secrets to Git.
+Copy `terraform.tfvars.example` to `terraform.tfvars` locally and replace the placeholders. The workflow uses the checked-in default variable values unless you add a protected `terraform.tfvars` securely or configure equivalent Terraform variables. Do not commit the real key name/IP/AMI values if you prefer to keep them private.
 
-## 1. Prepare the EC2 instance
+## 2. Configure GitHub OIDC for Terraform
 
-Launch an Ubuntu EC2 instance. For this lab, a small instance such as a `t2.micro` or `t3.micro` may be sufficient, subject to your region's availability and account eligibility.
+Create the GitHub OIDC provider in AWS if it does not exist:
 
-Configure its security group:
-
-| Type | Port | Source | Purpose |
-|---|---:|---|---|
-| SSH | 22 | Temporary GitHub Actions runner IP /32 | Added and removed by the workflow |
-| Custom TCP | 5000 | Your own public IP /32 | Test the Flask app from your computer |
-
-Do not leave SSH open to `0.0.0.0/0`. Keep outbound access enabled so that Ubuntu can install packages. Confirm the instance has a route to the internet through an Internet Gateway and has a public IPv4 address.
-
-The EC2 login user for standard Ubuntu images is usually `ubuntu`.
-
-## 2. Configure GitHub OIDC in AWS
-
-Create an IAM OIDC identity provider if it does not already exist:
-
-- Provider URL: `https://token.actions.githubusercontent.com`
+- URL: `https://token.actions.githubusercontent.com`
 - Audience: `sts.amazonaws.com`
 
-Create an IAM role trusted by this provider. Restrict its trust policy to this repository and the GitHub Actions environment used in the workflow.
-
-Example trust policy condition for this project:
+Create an IAM role with a trust policy restricted to this repository and GitHub Environment:
 
 ```json
 {
-  "StringEquals": {
-    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-    "token.actions.githubusercontent.com:sub": "repo:VENKATASUBBARAO13/aws-python-app-github-actions-deployment:environment:public-ec2-deployment"
-  }
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::YOUR_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        "token.actions.githubusercontent.com:sub": "repo:VENКATASUBBARAO13/aws-python-app-github-actions-deployment:environment:terraform-infrastructure"
+      }
+    }
+  }]
 }
 ```
 
-Attach a least-privilege permissions policy allowing the role to add and remove the temporary SSH ingress rule on the EC2 security group. It also needs the permissions required to describe the target security group if you add validation steps.
+Attach an appropriately scoped infrastructure policy for this Terraform lab. Terraform will need permissions to manage the VPC, subnet, route table, internet gateway, security group, EC2 instance, and related resources. For a learning account, avoid using root credentials; use a dedicated IAM role and review all permissions. Do not copy an unrestricted administrator policy into a production environment.
 
-At minimum for the workflow's security group changes, grant:
-- `ec2:AuthorizeSecurityGroupIngress`
-- `ec2:RevokeSecurityGroupIngress`
+## 3. GitHub configuration for infrastructure workflow
 
-Scope the permissions to the specific security group wherever supported. Do not attach `AdministratorAccess`.
+Create GitHub Environment: `terraform-infrastructure`.
 
-## 3. Configure GitHub repository variables and secrets
+Add environment secret:
 
-Open the repository in GitHub and navigate to **Settings → Secrets and variables → Actions**.
-
-Create these repository variables:
-
-| Variable | Value |
+| Name | Value |
 |---|---|
-| `AWS_REGION` | Region where the EC2 instance is running, e.g. `ap-south-1` |
-| `EC2_PUBLIC_IP` | EC2 instance's public IPv4 address |
-| `EC2_SECURITY_GROUP_ID` | Security group ID attached to the EC2 instance |
-| `EC2_SSH_USER` | `ubuntu` for standard Ubuntu images |
+| `AWS_ROLE_TO_ASSUME` | IAM role ARN for GitHub OIDC |
 
-Create these repository secrets:
+Add environment variable:
 
-| Secret | Value |
+| Name | Value |
 |---|---|
-| `AWS_ROLE_TO_ASSUME` | ARN of the IAM role trusted by GitHub OIDC |
-| `EC2_SSH_PRIVATE_KEY` | Full PEM private key corresponding to the EC2 key pair |
+| `AWS_REGION` | AWS region, e.g. `ap-south-1` |
 
-For better isolation, configure the workflow's GitHub Environment named `public-ec2-deployment` and place the role ARN and SSH key in that environment's secrets. The variable names must match the workflow exactly.
+Terraform inputs are declared in `variables.tf`. Set the correct AMI, key pair, AZ and ingress CIDRs before applying.
 
-Never paste the private key into the workflow YAML or commit it to the repository.
+## 4. Run the infrastructure workflow
 
-## 4. Run the deployment
+1. Open **Actions**.
+2. Select **Terraform - Provision Public EC2 Infrastructure**.
+3. Click **Run workflow**.
+4. Select `plan` first. Review the plan.
+5. Run it again with `apply` only after confirming the AMI, region, CIDRs, instance type and estimated cost.
+6. Open the completed workflow logs and inspect the Terraform outputs.
 
-1. Push the project files to the `main` branch.
-2. Open the repository's **Actions** tab.
-3. Select **Deploy Python App to Public EC2**.
-4. Click **Run workflow** and select `main`.
-5. Open the run and inspect the logs.
+Terraform creates the VPC, public subnet, IGW, public route table, security group and EC2 instance.
 
-The workflow:
-1. Checks out the repository.
-2. Assumes the AWS IAM role using GitHub OIDC.
-3. Creates an SSH key file from the GitHub secret.
-4. Detects the runner's public IP and temporarily adds that IP as a /32 SSH ingress rule.
-5. Packages the Flask application and copies it to EC2 using SCP.
-6. Runs the deployment script over SSH.
-7. Checks the application health endpoint locally on EC2.
-8. Removes the temporary SSH ingress rule, even when an earlier deployment step fails after the rule was created.
+## 5. Capture the EC2 public IP
 
-The workflow is initially configured for manual execution so you can test it safely. Automatic deployment on every push can be enabled later.
+After Terraform apply succeeds, find `instance_public_ip` in the workflow output. Add the following variables to the GitHub Environment `public-ec2-deployment`:
 
-## 5. Verify deployment
+| Name | Value |
+|---|---|
+| `EC2_PUBLIC_IP` | Terraform output `instance_public_ip` |
+| `EC2_SSH_USER` | `ubuntu` |
 
-From your computer, open:
+Add environment secret:
+
+| Name | Value |
+|---|---|
+| `EC2_SSH_PRIVATE_KEY` | PEM private key for the EC2 key pair |
+
+The EC2 instance must be ready to accept SSH before starting the deployment workflow.
+
+## 6. Deploy the Python app
+
+1. Open **Actions**.
+2. Select **Deploy Python App to Public EC2**.
+3. Click **Run workflow**.
+4. Inspect the SSH, SCP, installation and health-check steps.
+
+The workflow uses the EC2 public IP and key to copy the application bundle and run `scripts/deploy.sh`. It installs Flask and Gunicorn, creates a systemd service and checks `/health`.
+
+## 7. Verify
+
+Open:
 
 ```text
 http://EC2_PUBLIC_IP:5000/
 http://EC2_PUBLIC_IP:5000/health
 ```
-
-Replace `EC2_PUBLIC_IP` with your instance's actual public IPv4 address. Your computer's current public IP must be allowed on TCP/5000 in the EC2 security group.
 
 Expected health response:
 
@@ -168,38 +184,29 @@ Expected health response:
 {"status":"healthy"}
 ```
 
-On the EC2 instance, inspect the service:
+Your own IP must be allowed on TCP/5000 in the EC2 security group.
 
-```bash
-sudo systemctl status aws-python-app
-sudo journalctl -u aws-python-app -n 100 --no-pager
-```
+## 8. Destroy infrastructure
 
-## Troubleshooting
+When the lab is finished, use the Terraform workflow and select `destroy`. Review the log and confirm resources are removed in the AWS console. Do not destroy resources that are used by other projects.
 
-- **SSH timeout:** Check the EC2 public IP, route to the Internet Gateway, security group rule and network ACL. Confirm the workflow's temporary runner /32 ingress rule was added.
-- **Permission denied (publickey):** Confirm the GitHub private-key secret matches the EC2 key pair and that the SSH user is correct.
-- **AWS role assumption failed:** Check the OIDC provider, role trust policy, audience, repository name and environment subject.
-- **Deployment script failed:** Inspect the GitHub Actions log and EC2 system journal.
-- **Cannot open port 5000:** Allow TCP/5000 only from your own public IP /32 and verify the application service is active.
+## Important notes
 
-## Cost and security notes
-
-- EC2, EBS storage and public IPv4 addresses may incur charges.
-- Stop or terminate test resources when finished; deleting an EC2 instance does not always remove separately allocated resources.
-- The GitHub runner's IP changes. The workflow temporarily adds the current runner IP and removes that exact rule at the end.
-- If a job is forcibly cancelled or the cleanup step cannot run, inspect the EC2 security group and remove any leftover temporary SSH rule manually.
-- The application endpoint uses HTTP for this learning exercise. Do not use this setup as-is for a production application handling sensitive traffic.
-- In a production design, consider a load balancer, HTTPS, private subnets, and managed deployment/access mechanisms.
+- The workflow is manually triggered, with plan/apply/destroy choices.
+- Terraform state is stored in the GitHub runner during each run in this basic lab. This is not a persistent remote state setup. Avoid concurrent applies; for a longer-lived project, configure an S3 backend with state locking.
+- The Terraform configuration expects an existing EC2 key pair and region-specific Ubuntu AMI.
+- The first version uses public EC2. It is a learning design, not a production architecture.
+- EC2, EBS and public IPv4 can incur charges. Destroy lab resources when finished.
+- The private EC2 deployment through Bastion Host and SSM will be added after the public deployment is tested.
 
 ## What I learned
 
-- Deploying a Python Flask application to Amazon EC2.
-- Automating deployment with GitHub Actions.
-- Using GitHub OIDC to authenticate to AWS without storing long-lived AWS access keys.
-- Using SSH and SCP to deploy application code.
-- Managing a Python application with Gunicorn and systemd.
-- Restricting SSH access to a temporary runner IP address.
+- Defining AWS infrastructure using Terraform modules/resources.
+- Provisioning VPC networking and a public EC2 instance.
+- Automating Terraform plan, apply and destroy with GitHub Actions.
+- Authenticating GitHub Actions to AWS with OIDC.
+- Deploying a Python application to EC2 using SSH and SCP.
+- Managing a Flask service with Gunicorn and systemd.
 
 ## Author
 
